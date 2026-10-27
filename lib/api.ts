@@ -7,6 +7,7 @@ import { NextResponse } from 'next/server'
 import { requireUser, type AppUser } from '@/lib/auth'
 import { assertRateLimit } from '@/lib/rate-limit'
 import { getSession } from '@/ai/patchllama/store'
+import { sanitizeErrorMessage } from '@/ai/patchllama/storage/sanitize'
 import type { DebugSession } from '@/ai/patchllama/types'
 
 const MAX_BODY_BYTES = Number(process.env.PATCHLLAMA_MAX_BODY_BYTES) || 1_500_000
@@ -51,10 +52,7 @@ export async function loadOwnedSession(sessionId: string, userId: string): Promi
 
 export function errorResponse(error: unknown) {
   const status = (error as { status?: number })?.status || 400
-  const raw = error instanceof Error ? error.message : String(error)
-  const message = raw
-    .replace(/postgres(?:ql)?:\/\/[^\s)'"]+/gi, '[redacted]')
-    .replace(/npg_[A-Za-z0-9]+/g, '[redacted]')
+  const message = sanitizeErrorMessage(error)
   const code =
     (error as { code?: string })?.code ||
     (status === 401

@@ -60,7 +60,7 @@ describeDb('postgres session store (Neon integration)', () => {
       // ignore cleanup failures
     }
     await closeDb()
-  })
+  }, 60_000)
 
   it(
     'creates, reads, updates, lists, isolates owners, and persists across clients',
@@ -141,20 +141,24 @@ describeDb('postgres session store (Neon integration)', () => {
     60_000
   )
 
-  it('detects version conflicts and does not partially apply', async () => {
-    const store = createPostgresStore(getDb())
-    const session = await store.createSession(sample('owner_conflict', 'conflict'))
-    createdIds.push(session.id)
+  it(
+    'detects version conflicts and does not partially apply',
+    async () => {
+      const store = createPostgresStore(getDb())
+      const session = await store.createSession(sample('owner_conflict', 'conflict'))
+      createdIds.push(session.id)
 
-    await store.saveSession({ ...session, status: 'analyzing' })
-    await expect(
-      store.saveSession({ ...session, status: 'failed', repairAttempts: 99 })
-    ).rejects.toBeInstanceOf(VersionConflictError)
+      await store.saveSession({ ...session, status: 'analyzing' })
+      await expect(
+        store.saveSession({ ...session, status: 'failed', repairAttempts: 99 })
+      ).rejects.toBeInstanceOf(VersionConflictError)
 
-    const current = await store.getSession(session.id)
-    expect(current?.status).toBe('analyzing')
-    expect(current?.repairAttempts).toBe(0)
-  })
+      const current = await store.getSession(session.id)
+      expect(current?.status).toBe('analyzing')
+      expect(current?.repairAttempts).toBe(0)
+    },
+    60_000
+  )
 })
 
 describe('postgres store gate', () => {

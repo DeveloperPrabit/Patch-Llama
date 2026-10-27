@@ -92,5 +92,6 @@ If a connection string is exposed (chat, logs, screenshots):
 
 - Identity comes only from the Auth.js server session; never trust client `userId`.
 - `workspace_root` in the DB is a filesystem hint — path access still goes through the managed workspace + path guard.
-- Tokens, OAuth secrets, and `DATABASE_URL` must never appear in `payload` / audit `meta` (redacted on write).
+- Tokens, OAuth secrets, and `DATABASE_URL` must never appear in `payload` / audit `meta` / stdout / stderr (best-effort redaction on write). Regex redaction is **not** a guarantee that every secret is detected.
 - Keep transactions short: never hold a DB transaction open across Muse Spark or Docker runs.
+- Migrations are operator-run (`npm run db:migrate`); they do not execute on every request.

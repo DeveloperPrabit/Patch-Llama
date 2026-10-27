@@ -145,6 +145,7 @@ Without `MODEL_API_KEY`, analysis uses labeled **DEMO / MOCK**.
 | GitHub | Pin commit SHA; repair branch + PR after VERIFIED + explicit confirm; never push default branch |
 
 See [docs/DATABASE.md](docs/DATABASE.md) for Neon setup, migrations, import, backup, and rotation.  
+See [docs/SECURITY-REVIEW.md](docs/SECURITY-REVIEW.md) for current security status and known limits.  
 See [docs/AUDIT.md](docs/AUDIT.md) for measured baseline check results.
 
 ### Checks

@@ -6,6 +6,7 @@
 import { randomUUID } from 'node:crypto'
 import type { DebugSession } from './types'
 import { getSessionStore } from './storage'
+import { redactSecretText, redactSecrets } from './storage/sanitize'
 import type { CreateSessionInput } from './storage/types'
 
 export type { CreateSessionInput }
@@ -41,7 +42,13 @@ export function appendAudit(
     ...session,
     audit: [
       ...session.audit,
-      { id: randomUUID(), ts: new Date().toISOString(), type, detail, meta },
+      {
+        id: randomUUID(),
+        ts: new Date().toISOString(),
+        type,
+        detail: redactSecretText(detail),
+        meta: meta ? redactSecrets(meta) : undefined,
+      },
     ],
   }
 }

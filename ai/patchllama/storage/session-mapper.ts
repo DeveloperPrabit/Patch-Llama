@@ -4,7 +4,7 @@
  */
 
 import type { DebugSession, ExecutionAttempt, PatchRecord, AuditEvent } from '../types'
-import { redactSecrets } from './sanitize'
+import { redactSecretText, redactSecrets } from './sanitize'
 
 export type SessionPayload = Omit<DebugSession, 'version'> & { version?: number }
 
@@ -70,20 +70,31 @@ export function patchRows(session: DebugSession) {
   }))
 }
 
+export function sanitizeExecution(ex: ExecutionAttempt): ExecutionAttempt {
+  return {
+    ...ex,
+    stdout: redactSecretText(ex.stdout),
+    stderr: redactSecretText(ex.stderr),
+  }
+}
+
 export function executionRows(session: DebugSession) {
-  return session.executions.map((ex) => ({
-    id: ex.id,
-    sessionId: session.id,
-    kind: ex.kind,
-    command: ex.command,
-    exitCode: ex.exitCode,
-    ok: ex.ok ? 1 : 0,
-    durationMs: ex.durationMs,
-    stdout: ex.stdout,
-    stderr: ex.stderr,
-    timedOut: ex.timedOut ? 1 : 0,
-    createdAt: new Date(ex.createdAt),
-  }))
+  return session.executions.map((ex) => {
+    const safe = sanitizeExecution(ex)
+    return {
+      id: safe.id,
+      sessionId: session.id,
+      kind: safe.kind,
+      command: safe.command,
+      exitCode: safe.exitCode,
+      ok: safe.ok ? 1 : 0,
+      durationMs: safe.durationMs,
+      stdout: safe.stdout,
+      stderr: safe.stderr,
+      timedOut: safe.timedOut ? 1 : 0,
+      createdAt: new Date(safe.createdAt),
+    }
+  })
 }
 
 export function auditRows(session: DebugSession) {
@@ -91,7 +102,7 @@ export function auditRows(session: DebugSession) {
     id: ev.id,
     sessionId: session.id,
     type: ev.type,
-    detail: ev.detail,
+    detail: redactSecretText(ev.detail),
     meta: ev.meta ? redactSecrets(ev.meta) : null,
     createdAt: new Date(ev.ts),
   }))

@@ -1,70 +1,48 @@
-# Security review — post-9e35661 hardening (unpushed)
+# Security review — PatchLlama
 
-Review date: 2026-10-27  
-Base commit reviewed: `9e35661`  
-Working tree: local fixes **not pushed** (awaiting review)
+**Current commit (pre-push working tree):** production-readiness fixes on top of `b652ae4`  
+**Previous hardening:** `94361f8` (auth/git/PR), `b652ae4` (Neon persistence)
 
-## Findings addressed
+## Status legend
 
-### 1. Authentication fail-closed
-- Removed implicit demo Credentials provider when GitHub OAuth was missing.
-- Added [`lib/auth-config.ts`](../lib/auth-config.ts): production requires strong `AUTH_SECRET` (≥32, not placeholder) **and** GitHub OAuth.
-- Demo login requires `PATCHLLAMA_MODE=demo|local` **and** `AUTH_DEMO_LOGIN=1`, and is **always disabled** when `NODE_ENV=production`.
-- [`/api/auth/demo-login`](../app/api/auth/demo-login/route.ts) returns `403 DEMO_LOGIN_DISABLED` / `503` when misconfigured.
+| Label | Meaning |
+|-------|---------|
+| Implemented and tested | Code + automated tests executed in this environment |
+| Implemented, not integration-tested | Code present; live external system not exercised |
+| Requires infrastructure | Needs Docker / OAuth / Muse Spark / Neon credentials |
+| Known limitation | Honest residual risk |
 
-### 2. GitHub credentials
-- Stopped embedding tokens in Git URLs / remotes.
-- New [`ai/github/git-credential.ts`](../ai/github/git-credential.ts): short-lived `GIT_ASKPASS` helper; password only in child env; `finally` cleanup; argv refusal if token-like material appears; stderr redaction.
-- Clone/PR use clean `https://github.com/owner/repo.git` remotes only.
-- OAuth scopes reduced to `read:user repo` (documented minimum for private clone + PR).
+## Protections (must remain intact)
 
-### 3. PR integrity
-- New [`ai/github/pr.ts`](../ai/github/pr.ts): stages **only applied patch file paths**; validates remote URL; checks every git exit code; refuses head==base; never pushes default branch names as head; removes `origin` in `finally`.
-- Route validates repo via GitHub API and confirms base branch exists.
+| Control | Status |
+|---------|--------|
+| Auth.js session identity; never trust client `userId` | Implemented and tested |
+| Production auth fail-closed (strong secret + GitHub) | Implemented and tested |
+| Demo login disabled in production | Implemented and tested |
+| Git credentials via GIT_ASKPASS (not URL-embedded) | Implemented and tested |
+| PR stages approved patch files only; owned + verified + confirm | Implemented and tested |
+| Docker fail-closed if isolation unavailable | Implemented and tested (unavailable path); live Docker E2E requires infrastructure |
+| Docker env scrubbed of model/GitHub secrets | Implemented and tested |
+| Path guards + command allowlists | Implemented and tested |
+| Rate limits, body size limits, ownership checks | Implemented and tested |
+| Production Postgres required; no silent JSON fallback | Implemented and tested |
+| Optimistic session `version` concurrency | Implemented and tested (JSON + Neon) |
+| Text/stdout/stderr redaction (best-effort regex) | Implemented and tested |
+| Analysis failure → `blocked` (not stuck `analyzing`) | Implemented and tested |
+| Patch `create`/`replace` integrity + multi-file rollback | Implemented and tested |
 
-### 4. Regression tests added
-- Auth config / demo restrictions / production fail-closed
-- Git argv token refusal + redaction
-- PR staging policy (approved files only)
-- Unauthorized session report/approve
-- Existing: path-guard, env isolation, docker unavailable, ownership, fingerprint
+## Secret redaction — limits
 
-### 5. Docker execution review
-**Fixed / improved**
-- Timeout now attempts process-tree kill (`taskkill /T` on Windows, process group elsewhere).
-- Mount path must resolve under managed workspace roots (`assertWorkspaceRoot`).
-- Concurrent approve/apply serialized per session (`session-lock.ts`).
-- Sandbox env asserts no `MODEL_*` / `GIT_ASKPASS_PASSWORD`.
+Automated redaction covers common token formats, DB URLs, Bearer headers, env-style assignments, and PEM blocks in free-form text. **It does not guarantee every possible secret is detected.** Prefer not placing credentials in workspaces, test output, or model context.
 
-**Honest limitations (not claimed as complete)**
-- Workspace mount remains **read-write** (needed for package managers/tests). Isolation is container + managed-root boundary, not a read-only project FS.
-- Docker daemon was unavailable in earlier audits; Docker-dependent E2E remains **blocked** until Docker Desktop is healthy (`ISOLATION_UNAVAILABLE`).
-- In-process session lock is single-node only (not distributed).
+## Remaining risks / infrastructure
 
-## Commands executed (this review)
-
-| Command | Exit | Result |
-|---------|------|--------|
-| `npm run typecheck` | `0` | PASSED |
-| `npm run test` | `0` | PASSED — **9 files / 17 tests** |
-| `npm run build` | `0` | PASSED |
-
-### Skipped / not run
-- Live Muse Spark (`RUN_LIVE_META`) — not enabled
-- Live Docker exec / real GitHub clone-PR E2E — Docker daemon / OAuth credentials not exercised in this pass
-- Symlink escape test may no-op on Windows without symlink privilege (still covered when symlink creation succeeds)
-
-## Diff summary (unpushed)
-
-Modified: `lib/auth.ts`, `app/api/auth/demo-login/route.ts`, `ai/github/clone.ts`, `app/api/patchllama/github/pr/route.ts`, `ai/patchllama/docker-executor.ts`, `ai/patchllama/pipeline.ts`, workspace page auth error handling, `.env.example`
-
-Added: `lib/auth-config.ts`, `ai/github/git-credential.ts`, `ai/github/pr.ts`, `ai/patchllama/session-lock.ts`, auth/git/PR/unauthorized tests, this document
-
-## Remaining risks
-1. Start Docker Desktop before claiming VERIFIED on real/demo baseline paths.
-2. Production deploy must set strong `AUTH_SECRET` + GitHub OAuth; demo flags must stay off.
-3. Postgres SessionStore still schema-only for multi-user hosting.
-4. GIT_ASKPASS on Windows relies on cmd scripting; prefer Linux runners for production clone/PR if Windows askpass proves flaky.
+1. Start Docker Desktop before claiming VERIFIED on real baseline/verify paths.
+2. Production deploy must set strong `AUTH_SECRET`, GitHub OAuth, `DATABASE_URL`, and `PATCHLLAMA_STORAGE=postgres` (or rely on production default).
+3. In-process session lock is single-node; cross-instance safety relies on DB `version`.
+4. Live Muse Spark, live GitHub clone/PR, and hosted Neon under production traffic were **not** E2E-exercised in every review pass — use staging first.
+5. Rotate any Neon password that was ever pasted into chat or tickets.
 
 ## Push status
-**Not pushed.** Present this review and local diff for approval before updating `origin/main`.
+
+Document updates and readiness fixes may be **uncommitted**. Do not treat this file as proof that `origin/main` already contains the latest working tree.
