@@ -94,7 +94,7 @@ Verification report (real stdout/stderr + exit codes)
 
 - **No silent failover** to OpenAI / Claude / Gemini for PatchLlama diagnosis or patching.  
 - Demo mode is always labeled **DEMO / MOCK** in the UI.  
-- Session history is stored as local JSON under `.data/patchllama/` (gitignored).
+- Session history: **Neon PostgreSQL** for hosted/production; local JSON under `.data/patchllama/` only when `PATCHLLAMA_STORAGE=json` (demo/dev).
 
 ---
 
@@ -141,9 +141,10 @@ Without `MODEL_API_KEY`, analysis uses labeled **DEMO / MOCK**.
 | Secrets | `MODEL_API_KEY` / `AUTH_*` / tokens never passed into project containers |
 | Fail closed | If Docker is unhealthy → `ISOLATION_UNAVAILABLE` (no fake host sandbox) |
 | Evidence | `INCONCLUSIVE` if baseline check exits 0; `VERIFIED` only after Docker exit 0 |
-| Storage | JSON = local/demo only; **Postgres (`DATABASE_URL`) required for hosted multi-user** |
+| Storage | JSON = local/demo only; **Neon Postgres (`DATABASE_URL`) required in production** — no silent JSON fallback |
 | GitHub | Pin commit SHA; repair branch + PR after VERIFIED + explicit confirm; never push default branch |
 
+See [docs/DATABASE.md](docs/DATABASE.md) for Neon setup, migrations, import, backup, and rotation.  
 See [docs/AUDIT.md](docs/AUDIT.md) for measured baseline check results.
 
 ### Checks
@@ -156,15 +157,27 @@ npm run build
 
 ### Env
 
-See [`.env.example`](.env.example):
+See [`.env.example`](.env.example). Minimum for local demo:
 
 ```bash
+AUTH_SECRET=replace-with-a-long-random-secret-at-least-32-chars
+PATCHLLAMA_MODE=demo
+AUTH_DEMO_LOGIN=1
+PATCHLLAMA_STORAGE=json
 MODEL_API_KEY=LLM_your_meta_key
 MODEL_API_BASE_URL=https://api.meta.ai/v1
 MODEL_NAME=muse-spark-1.3
 ```
 
-Never commit `.env`.
+Hosted / production:
+
+```bash
+PATCHLLAMA_STORAGE=postgres
+DATABASE_URL=postgresql://USER:PASSWORD@HOST-pooler.../neondb?sslmode=require
+npm run db:migrate
+```
+
+Never commit `.env` / `.env.local` or real connection strings.
 
 ---
 

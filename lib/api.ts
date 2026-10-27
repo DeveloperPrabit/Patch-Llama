@@ -51,17 +51,22 @@ export async function loadOwnedSession(sessionId: string, userId: string): Promi
 
 export function errorResponse(error: unknown) {
   const status = (error as { status?: number })?.status || 400
-  const message = error instanceof Error ? error.message : String(error)
+  const raw = error instanceof Error ? error.message : String(error)
+  const message = raw
+    .replace(/postgres(?:ql)?:\/\/[^\s)'"]+/gi, '[redacted]')
+    .replace(/npg_[A-Za-z0-9]+/g, '[redacted]')
   const code =
     (error as { code?: string })?.code ||
     (status === 401
       ? 'unauthorized'
       : status === 404
         ? 'not_found'
-        : status === 429
-          ? 'rate_limited'
-          : status === 503
-            ? 'isolation_unavailable'
-            : 'error')
+        : status === 409
+          ? 'version_conflict'
+          : status === 429
+            ? 'rate_limited'
+            : status === 503
+              ? 'isolation_unavailable'
+              : 'error')
   return NextResponse.json({ error: { code, message } }, { status })
 }

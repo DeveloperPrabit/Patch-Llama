@@ -10,7 +10,12 @@
     "start": "next start",
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
-    "test:watch": "vitest"
+    "test:watch": "vitest",
+    "test:db": "vitest run ai/patchllama/__tests__/postgres-store.test.ts",
+    "db:generate": "drizzle-kit generate",
+    "db:migrate": "drizzle-kit migrate",
+    "db:studio": "drizzle-kit studio",
+    "storage:import-json": "tsx scripts/import-json-sessions.ts"
   },
   "dependencies": {
     "drizzle-orm": "^0.45.4",
@@ -19,6 +24,7 @@
     "postgres": "^3.4.9",
     "react": "^19.1.0",
     "react-dom": "^19.1.0",
+    "server-only": "^0.0.1",
     "zod": "^4.0.14"
   },
   "devDependencies": {
@@ -26,6 +32,7 @@
     "@types/react": "^19.1.0",
     "@types/react-dom": "^19.1.0",
     "drizzle-kit": "^0.31.11",
+    "tsx": "^4.23.15",
     "typescript": "^5.8.3",
     "vitest": "^5.0.5"
   },

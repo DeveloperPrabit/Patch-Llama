@@ -83,5 +83,5 @@ docker info → failed to connect to dockerDesktopLinuxEngine pipe
 - Docker daemon was **down** during audit — approve/verify/baseline will return `ISOLATION_UNAVAILABLE` until Docker Desktop is started.
 - Live Muse Spark integration test not run in this pass (`RUN_LIVE_META` unset).
 - Real GitHub end-to-end (clone → baseline → PR) not executed without OAuth credentials.
-- Postgres store schema exists (`db/schema.ts`); JSON remains active until `DATABASE_URL` wired to a Drizzle repository implementation in a follow-up.
+- Postgres store is implemented (`db/` + `ai/patchllama/storage/`); production requires Neon `DATABASE_URL`. JSON remains explicit local/demo only (`PATCHLLAMA_STORAGE=json`).
 - Auth.js demo credentials login is for local/demo; production must set `AUTH_GITHUB_ID` / `AUTH_GITHUB_SECRET` and a strong `AUTH_SECRET`.

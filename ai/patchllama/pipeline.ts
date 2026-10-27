@@ -119,7 +119,7 @@ export async function runBaseline(sessionId: string, userId: string): Promise<De
 
   const kind = kindFromFailure(session.intake.failureType)
   session = appendAudit(session, 'baseline_started', `Running ${kind}`)
-  await saveSession(session)
+  session = await saveSession(session)
 
   const baseline = await runAllowlisted(session.workspaceRoot, kind, 'baseline')
   session = {
@@ -169,7 +169,7 @@ export async function analyzeSession(sessionId: string, userId: string): Promise
   }
 
   let next = appendAudit({ ...session, status: 'analyzing' }, 'analyze_started', 'Root-cause analysis')
-  await saveSession(next)
+  next = await saveSession(next)
 
   const demo = isPatchllamaDemoMode()
   let diagnosis: Diagnosis

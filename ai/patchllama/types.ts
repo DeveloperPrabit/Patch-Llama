@@ -88,7 +88,7 @@ export type DebugSession = {
   userId: string
   status: SessionStatus
   intake: FailureIntake
-  /** Server-managed workspace only */
+  /** Server-managed workspace only — never authorize filesystem access from DB alone. */
   workspaceRoot: string
   workspaceId: string
   files: WorkspaceFile[]
@@ -105,6 +105,8 @@ export type DebugSession = {
   audit: AuditEvent[]
   error?: string
   isolation?: 'docker' | 'unavailable' | 'demo_pending'
+  /** Optimistic concurrency token (Postgres + JSON). */
+  version?: number
 }
 
 export function toReportStatus(session: DebugSession): TerminalReportStatus {
