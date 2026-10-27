@@ -75,7 +75,14 @@ function WorkspaceInner() {
   const fileContent = session?.files.find((f) => f.path === selectedFile)?.content || ''
 
   async function ensureAuth() {
-    await fetch('/api/auth/demo-login', { method: 'POST' })
+    const res = await fetch('/api/auth/demo-login', { method: 'POST' })
+    if (!res.ok) {
+      const data = await res.json().catch(() => ({}))
+      throw new Error(
+        data?.error?.message ||
+          'Authentication required. Configure GitHub OAuth or enable local demo mode (PATCHLLAMA_MODE=demo and AUTH_DEMO_LOGIN=1).'
+      )
+    }
   }
 
   async function runDemo(scenario: string) {

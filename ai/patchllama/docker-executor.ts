@@ -7,6 +7,8 @@ import { randomUUID } from 'node:crypto'
 import { spawn } from 'node:child_process'
 import path from 'node:path'
 import type { ExecutionAttempt } from './types'
+import { assertWorkspaceRoot } from './path-guard'
+import { managedRoots } from './workspace-manager'
 
 export class IsolationUnavailableError extends Error {
   readonly code = 'ISOLATION_UNAVAILABLE'
@@ -38,7 +40,7 @@ export function sandboxEnv(): string[] {
 export function assertSandboxEnvSafe(envLines: string[] = sandboxEnv()) {
   for (const line of envLines) {
     const key = line.split('=')[0]
-    if (/^(MODEL_|AUTH_|DATABASE_|GITHUB_|AWS_|OPENAI_)/i.test(key)) {
+    if (/^(MODEL_|AUTH_|DATABASE_|GITHUB_|AWS_|OPENAI_|GIT_ASKPASS_PASSWORD)/i.test(key)) {
       throw new Error(`Forbidden env key in sandbox: ${key}`)
     }
   }
@@ -74,19 +76,52 @@ function bunArgs(kind: ExecKind): string[] {
   return ['run', 'typecheck']
 }
 
-function runHostCommand(
+function killProcessTree(pid: number) {
+  try {
+    if (process.platform === 'win32') {
+      spawn('taskkill', ['/pid', String(pid), '/T', '/F'], { shell: false, windowsHide: true })
+    } else {
+      try {
+        process.kill(-pid, 'SIGKILL')
+      } catch {
+        process.kill(pid, 'SIGKILL')
+      }
+    }
+  } catch {
+    // best-effort
+  }
+}
+
+export function runHostCommand(
   cmd: string,
   args: string[],
   timeoutMs: number
 ): Promise<{ exitCode: number; stdout: string; stderr: string; timedOut: boolean }> {
   return new Promise((resolve) => {
-    const child = spawn(cmd, args, { shell: false, windowsHide: true, env: process.env })
+    const child = spawn(cmd, args, {
+      shell: false,
+      windowsHide: true,
+      env: process.env,
+      detached: process.platform !== 'win32',
+    })
     let stdout = ''
     let stderr = ''
     let timedOut = false
+    let settled = false
+    const finish = (payload: {
+      exitCode: number
+      stdout: string
+      stderr: string
+      timedOut: boolean
+    }) => {
+      if (settled) return
+      settled = true
+      resolve(payload)
+    }
     const timer = setTimeout(() => {
       timedOut = true
-      child.kill()
+      if (child.pid) killProcessTree(child.pid)
+      else child.kill('SIGKILL')
     }, timeoutMs)
     child.stdout.on('data', (c) => {
       stdout += String(c)
@@ -98,30 +133,34 @@ function runHostCommand(
     })
     child.on('close', (code) => {
       clearTimeout(timer)
-      resolve({ exitCode: code ?? 1, stdout, stderr, timedOut })
+      finish({ exitCode: code ?? 1, stdout, stderr, timedOut })
     })
     child.on('error', (err) => {
       clearTimeout(timer)
-      resolve({ exitCode: 1, stdout, stderr: String(err), timedOut })
+      finish({ exitCode: 1, stdout, stderr: String(err), timedOut })
     })
   })
 }
 
 /**
  * Run an allowlisted bun command inside Docker.
- * Mounts workspace at /workspace (rw). Network disabled. Non-root user.
+ * Mounts managed workspace at /workspace (rw — required for install/test writes).
+ * Network disabled. Non-root user. Host secrets are not passed.
  */
 export async function runInDocker(
   workspaceRoot: string,
   kind: ExecKind
 ): Promise<ExecutionAttempt> {
   await assertDockerAvailable()
+  assertSandboxEnvSafe()
+  const roots = managedRoots()
+  await assertWorkspaceRoot(workspaceRoot, roots)
+
   const started = Date.now()
   const argsCmd = bunArgs(kind)
   const command = `bun ${argsCmd.join(' ')}`
   const absHost = path.resolve(workspaceRoot)
 
-  // Docker Desktop on Windows accepts //c/Users/... style via path conversion by Docker.
   const dockerArgs = [
     'run',
     '--rm',

@@ -265,35 +265,40 @@ export async function approvePatch(
   decision: 'approve' | 'reject',
   userId: string
 ): Promise<DebugSession> {
-  const session = await getSession(sessionId)
-  if (!session || session.userId !== userId) throw Object.assign(new Error('session not found'), { status: 404 })
-
-  const target = session.patches.find((p) => p.id === patchId)
-  if (!target) throw new Error('patch not found')
-  if (target.status !== 'proposed') {
-    // Idempotent: already decided
-    if (target.status === 'approved' || target.status === 'applied') return session
-    if (target.status === 'rejected') return session
-    throw new Error('patch is not awaiting approval')
-  }
-
-  const patches = session.patches.map((p) => {
-    if (p.id !== patchId) return p
-    return {
-      ...p,
-      status: decision === 'approve' ? ('approved' as const) : ('rejected' as const),
-      approvedAt: decision === 'approve' ? new Date().toISOString() : undefined,
+  const { withSessionLock } = await import('./session-lock')
+  return withSessionLock(sessionId, async () => {
+    const session = await getSession(sessionId)
+    if (!session || session.userId !== userId) {
+      throw Object.assign(new Error('session not found'), { status: 404 })
     }
+
+    const target = session.patches.find((p) => p.id === patchId)
+    if (!target) throw new Error('patch not found')
+    if (target.status !== 'proposed') {
+      // Idempotent: already decided
+      if (target.status === 'approved' || target.status === 'applied') return session
+      if (target.status === 'rejected') return session
+      throw new Error('patch is not awaiting approval')
+    }
+
+    const patches = session.patches.map((p) => {
+      if (p.id !== patchId) return p
+      return {
+        ...p,
+        status: decision === 'approve' ? ('approved' as const) : ('rejected' as const),
+        approvedAt: decision === 'approve' ? new Date().toISOString() : undefined,
+      }
+    })
+    let next: DebugSession = {
+      ...session,
+      patches,
+      status: decision === 'approve' ? 'applying' : 'awaiting_approval',
+    }
+    next = appendAudit(next, decision === 'approve' ? 'patch_approved' : 'patch_rejected', patchId)
+    next = await saveSession(next)
+    if (decision === 'approve') return applyAndVerify(next.id, patchId, userId)
+    return next
   })
-  let next: DebugSession = {
-    ...session,
-    patches,
-    status: decision === 'approve' ? 'applying' : 'awaiting_approval',
-  }
-  next = appendAudit(next, decision === 'approve' ? 'patch_approved' : 'patch_rejected', patchId)
-  next = await saveSession(next)
-  if (decision === 'approve') return applyAndVerify(next.id, patchId, userId)
-  return next
 }
 
 async function applyAndVerify(sessionId: string, patchId: string, userId: string): Promise<DebugSession> {
