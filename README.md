@@ -7,6 +7,32 @@ It is **not** a website builder and **not** a full AI coding platform dump.
 
 This repository contains **only the PatchLlama product** — diagnose → propose patch → human approve → verify with real commands.
 
+## Screenshots
+
+### Home
+
+![PatchLlama home](docs/images/01-home.png)
+
+### Workspace (start a demo)
+
+![PatchLlama workspace](docs/images/02-workspace.png)
+
+### Diagnosis + proposed diff (`awaiting_approval`)
+
+![Diagnosis and unified diff](docs/images/03-diagnosis.png)
+
+### Applied patch + AI diagnosis
+
+![Verified patch and diagnosis](docs/images/04-verified.png)
+
+### Verification report (`bun test` exit 0 · PASS)
+
+![Verification report and audit](docs/images/05-verification-report.png)
+
+### Settings · Meta Muse Spark status
+
+![Meta API settings](docs/images/06-settings.png)
+
 ---
 
 ## Major problem it solves
