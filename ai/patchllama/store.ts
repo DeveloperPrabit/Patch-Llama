@@ -1,7 +1,6 @@
 /*
  * SPDX-License-Identifier: AGPL-3.0-only
- * PatchLlama — local JSON session store (hackathon demo + offline-friendly).
- * Drizzle schema mirrors these shapes for future Postgres migration.
+ * Local JSON session store — local/demo only. Hosted multi-user requires Postgres.
  */
 
 import { randomUUID } from 'node:crypto'
@@ -29,7 +28,10 @@ async function atomicWrite(file: string, content: string) {
 }
 
 export async function createSession(
-  partial: Omit<DebugSession, 'id' | 'createdAt' | 'updatedAt' | 'patches' | 'executions' | 'audit' | 'repairAttempts'>
+  partial: Omit<
+    DebugSession,
+    'id' | 'createdAt' | 'updatedAt' | 'patches' | 'executions' | 'audit' | 'repairAttempts'
+  >
 ): Promise<DebugSession> {
   const now = new Date().toISOString()
   const session: DebugSession = {
@@ -68,20 +70,27 @@ export async function saveSession(session: DebugSession): Promise<DebugSession> 
   return next
 }
 
-export async function listSessions(limit = 50): Promise<DebugSession[]> {
+export async function listSessionsForUser(userId: string, limit = 50): Promise<DebugSession[]> {
   const dir = path.join(dataDir(), 'sessions')
   try {
     const { readdir } = await import('node:fs/promises')
     const files = (await readdir(dir)).filter((f) => f.endsWith('.json')).sort().reverse()
     const out: DebugSession[] = []
-    for (const file of files.slice(0, limit)) {
+    for (const file of files) {
+      if (out.length >= limit) break
       const raw = await readFile(path.join(dir, file), 'utf8')
-      out.push(JSON.parse(raw) as DebugSession)
+      const session = JSON.parse(raw) as DebugSession
+      if (session.userId === userId) out.push(session)
     }
     return out
   } catch {
     return []
   }
+}
+
+/** @deprecated Use listSessionsForUser — global list is insecure. */
+export async function listSessions(limit = 50): Promise<DebugSession[]> {
+  return listSessionsForUser('__none__', limit)
 }
 
 export function appendAudit(

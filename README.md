@@ -119,15 +119,40 @@ For a zero-setup walkthrough, use the built-in demos (seeded from `fixtures/patc
 ## Quick start
 
 ```bash
-bun install   # or: npm install
+npm install
 cp .env.example .env
-# optional: set MODEL_API_KEY for real Muse Spark
-bun run dev
+# Set AUTH_SECRET (required). AUTH_DEMO_LOGIN=1 enables local demo session.
+# Start Docker Desktop before approve/verify (fail closed if unavailable).
+npm run dev
 ```
 
 Open [http://localhost:3000/patchllama](http://localhost:3000/patchllama).
 
-Without `MODEL_API_KEY`, demos still work in labeled mock mode.
+Without `MODEL_API_KEY`, analysis uses labeled **DEMO / MOCK**.  
+`evidenceSource: seeded_fixture` means intake stderr was seeded — not a Docker baseline.
+
+### Security boundaries (read this)
+
+| Control | Behavior |
+|---------|----------|
+| Auth | Auth.js session required on mutating APIs; identity from server session only |
+| Workspaces | Server-managed under `.data/workspaces` — client cannot supply `workspaceRoot` |
+| Execution | Docker only (non-root, `--network none`, scrubbed env, memory/CPU/pids/time limits) |
+| Secrets | `MODEL_API_KEY` / `AUTH_*` / tokens never passed into project containers |
+| Fail closed | If Docker is unhealthy → `ISOLATION_UNAVAILABLE` (no fake host sandbox) |
+| Evidence | `INCONCLUSIVE` if baseline check exits 0; `VERIFIED` only after Docker exit 0 |
+| Storage | JSON = local/demo only; **Postgres (`DATABASE_URL`) required for hosted multi-user** |
+| GitHub | Pin commit SHA; repair branch + PR after VERIFIED + explicit confirm; never push default branch |
+
+See [docs/AUDIT.md](docs/AUDIT.md) for measured baseline check results.
+
+### Checks
+
+```bash
+npm run typecheck
+npm run test
+npm run build
+```
 
 ### Env
 

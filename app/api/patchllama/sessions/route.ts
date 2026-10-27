@@ -1,20 +1,19 @@
 /*
  * SPDX-License-Identifier: AGPL-3.0-only
- * GET/POST /api/patchllama/sessions
+ * GET/POST /api/patchllama/sessions — authenticated; identity from server session.
  */
 
 import { NextResponse } from 'next/server'
 import { startDebugSession } from '@/ai/patchllama/pipeline'
-import { listSessions } from '@/ai/patchllama/store'
+import { listSessionsForUser } from '@/ai/patchllama/store'
+import { createManagedWorkspace, writeWorkspaceFiles } from '@/ai/patchllama/workspace-manager'
+import { errorResponse, readJsonLimited, requireAuthed } from '@/lib/api'
 import { z } from 'zod/v4'
 
 export const runtime = 'nodejs'
 
 const CreateBody = z.object({
   projectId: z.string().default('local'),
-  organizationId: z.string().default('local'),
-  userId: z.string().default('local'),
-  workspaceRoot: z.string().min(1),
   intake: z.object({
     title: z.string().min(1).max(200),
     failureType: z.enum(['build', 'test', 'typecheck', 'runtime', 'lint', 'other']),
@@ -33,28 +32,46 @@ const CreateBody = z.object({
     .min(1)
     .max(40),
 })
+// Note: client-supplied userId / workspaceRoot are ignored; identity comes from auth().
 
-export async function GET() {
-  const sessions = await listSessions(40)
-  return NextResponse.json({
-    sessions: sessions.map((s) => ({
-      id: s.id,
-      title: s.intake.title,
-      status: s.status,
-      createdAt: s.createdAt,
-      updatedAt: s.updatedAt,
-      verified: s.status === 'verified',
-    })),
-  })
+export async function GET(request: Request) {
+  try {
+    const user = await requireAuthed(request, 'sessions-list', 60)
+    const sessions = await listSessionsForUser(user.id, 40)
+    return NextResponse.json({
+      sessions: sessions.map((s) => ({
+        id: s.id,
+        title: s.intake.title,
+        status: s.status,
+        createdAt: s.createdAt,
+        updatedAt: s.updatedAt,
+        evidenceSource: s.evidenceSource,
+        verified: s.status === 'verified',
+      })),
+    })
+  } catch (error) {
+    return errorResponse(error)
+  }
 }
 
 export async function POST(request: Request) {
   try {
-    const body = CreateBody.parse(await request.json())
-    const session = await startDebugSession(body)
+    const user = await requireAuthed(request, 'sessions-create', 20)
+    const body = CreateBody.parse(await readJsonLimited(request))
+    const ws = await createManagedWorkspace('sess')
+    await writeWorkspaceFiles(ws.root, body.files)
+    const session = await startDebugSession({
+      projectId: body.projectId,
+      organizationId: user.id,
+      userId: user.id,
+      intake: body.intake,
+      files: body.files,
+      workspaceRoot: ws.root,
+      workspaceId: ws.id,
+      evidenceSource: 'seeded_fixture',
+    })
     return NextResponse.json({ session }, { status: 201 })
   } catch (error) {
-    const message = error instanceof Error ? error.message : String(error)
-    return NextResponse.json({ error: { code: 'invalid_request', message } }, { status: 400 })
+    return errorResponse(error)
   }
 }

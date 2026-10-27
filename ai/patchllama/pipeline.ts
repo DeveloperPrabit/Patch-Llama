@@ -1,12 +1,11 @@
 /*
  * SPDX-License-Identifier: AGPL-3.0-only
  * PatchLlama — diagnose → patch → approve → apply → verify pipeline
+ * Execution always goes through Docker; fail closed if isolation unavailable.
  */
 
 import { randomUUID } from 'node:crypto'
-import { mkdir, readFile, writeFile } from 'node:fs/promises'
-import path from 'node:path'
-import { spawn } from 'node:child_process'
+import { mkdir, readFile, writeFile, unlink } from 'node:fs/promises'
 import { createMuseSparkClient } from '../muse-spark/client'
 import { getMaxRepairAttempts, isPatchllamaDemoMode } from '../muse-spark/config'
 import {
@@ -18,7 +17,8 @@ import {
   type PatchProposal,
 } from '../muse-spark/schemas'
 import { demoDiagnosis, demoPatch } from './demo'
-import { normalizeProjectPath } from './paths'
+import { IsolationUnavailableError, runInDocker, type ExecKind } from './docker-executor'
+import { normalizeProjectPath, resolveInsideWorkspace } from './path-guard'
 import { appendAudit, createSession, getSession, saveSession } from './store'
 import type {
   DebugSession,
@@ -27,7 +27,8 @@ import type {
   PatchRecord,
   WorkspaceFile,
 } from './types'
-import { toReportStatus } from './types'
+import { kindFromFailure, toReportStatus } from './types'
+import { fingerprintWorkspace } from './workspace-manager'
 
 const MAX_FILE_CHARS = 80_000
 const MAX_FILES = 30
@@ -64,55 +65,18 @@ function buildContext(intake: FailureIntake, files: WorkspaceFile[]): string {
 
 async function runAllowlisted(
   workspaceRoot: string,
-  kind: 'test' | 'build' | 'typecheck'
+  kind: ExecKind,
+  attemptKind: ExecutionAttempt['kind'] = 'verify'
 ): Promise<ExecutionAttempt> {
-  const started = Date.now()
-  const args =
-    kind === 'test'
-      ? ['test']
-      : kind === 'build'
-        ? ['run', 'build']
-        : ['run', 'typecheck']
-  const command = `bun ${args.join(' ')}`
-  return await new Promise((resolve) => {
-    const child = spawn('bun', args, {
-      cwd: workspaceRoot,
-      env: { ...process.env, CI: '1' },
-      shell: false,
-      windowsHide: true,
-    })
-    let stdout = ''
-    let stderr = ''
-    let timedOut = false
-    const timer = setTimeout(() => {
-      timedOut = true
-      child.kill()
-    }, 60_000)
-    child.stdout.on('data', (chunk) => {
-      stdout += String(chunk)
-      if (stdout.length > 50_000) stdout = stdout.slice(-50_000)
-    })
-    child.stderr.on('data', (chunk) => {
-      stderr += String(chunk)
-      if (stderr.length > 50_000) stderr = stderr.slice(-50_000)
-    })
-    child.on('close', (code) => {
-      clearTimeout(timer)
-      const exitCode = code ?? 1
-      resolve({
-        id: randomUUID(),
-        createdAt: new Date().toISOString(),
-        kind: 'verify',
-        command,
-        exitCode,
-        durationMs: Date.now() - started,
-        stdout,
-        stderr,
-        timedOut,
-        ok: !timedOut && exitCode === 0,
-      })
-    })
-  })
+  try {
+    const attempt = await runInDocker(workspaceRoot, kind)
+    return { ...attempt, kind: attemptKind }
+  } catch (error) {
+    if (error instanceof IsolationUnavailableError) {
+      Object.assign(error, { status: 503 })
+    }
+    throw error
+  }
 }
 
 export async function startDebugSession(input: {
@@ -122,6 +86,10 @@ export async function startDebugSession(input: {
   intake: FailureIntake
   files: WorkspaceFile[]
   workspaceRoot: string
+  workspaceId: string
+  evidenceSource: DebugSession['evidenceSource']
+  commitSha?: string
+  repoFullName?: string
 }): Promise<DebugSession> {
   const files = clipFiles(input.files)
   return createSession({
@@ -131,15 +99,74 @@ export async function startDebugSession(input: {
     status: 'intake',
     intake: input.intake,
     workspaceRoot: input.workspaceRoot,
+    workspaceId: input.workspaceId,
     files,
+    evidenceSource: input.evidenceSource,
+    commitSha: input.commitSha,
+    repoFullName: input.repoFullName,
     maxRepairAttempts: getMaxRepairAttempts(),
+    isolation: 'docker',
   })
 }
 
-export async function analyzeSession(sessionId: string): Promise<DebugSession> {
-  const session = await getSession(sessionId)
-  if (!session) throw new Error('session not found')
+/**
+ * Run the original check before analysis. If it passes, mark INCONCLUSIVE.
+ */
+export async function runBaseline(sessionId: string, userId: string): Promise<DebugSession> {
+  let session = await getSession(sessionId)
+  if (!session || session.userId !== userId) throw Object.assign(new Error('session not found'), { status: 404 })
   if (session.status === 'cancelled') throw new Error('session cancelled')
+
+  const kind = kindFromFailure(session.intake.failureType)
+  session = appendAudit(session, 'baseline_started', `Running ${kind}`)
+  await saveSession(session)
+
+  const baseline = await runAllowlisted(session.workspaceRoot, kind, 'baseline')
+  session = {
+    ...session,
+    baseline,
+    executions: [...session.executions, baseline],
+    evidenceSource: 'executed_baseline',
+    intake: {
+      ...session.intake,
+      exitCode: baseline.exitCode ?? 1,
+      stdout: baseline.stdout,
+      stderr: baseline.stderr,
+      command: baseline.command,
+    },
+  }
+
+  if (baseline.ok) {
+    session = appendAudit(
+      { ...session, status: 'inconclusive', error: 'Baseline check passed; failure not reproduced' },
+      'baseline_inconclusive',
+      'original check exited 0'
+    )
+    return saveSession(session)
+  }
+
+  session = appendAudit(session, 'baseline_failed', `exit=${baseline.exitCode}`)
+  session.workspaceFingerprint = await fingerprintWorkspace(
+    session.workspaceRoot,
+    session.files.map((f) => f.path)
+  )
+  return saveSession(session)
+}
+
+export async function analyzeSession(sessionId: string, userId: string): Promise<DebugSession> {
+  let session = await getSession(sessionId)
+  if (!session || session.userId !== userId) throw Object.assign(new Error('session not found'), { status: 404 })
+  if (session.status === 'cancelled') throw new Error('session cancelled')
+  if (session.status === 'inconclusive') throw new Error('session is inconclusive — failure not reproduced')
+
+  // Real sessions must have a baseline execution unless they are explicitly seeded fixtures
+  // that still require baseline before Muse Spark when requested by caller.
+  if (session.evidenceSource === 'executed_baseline' && !session.baseline) {
+    throw new Error('baseline required before analysis')
+  }
+  if (session.baseline?.ok) {
+    throw new Error('cannot analyze: baseline passed (INCONCLUSIVE)')
+  }
 
   let next = appendAudit({ ...session, status: 'analyzing' }, 'analyze_started', 'Root-cause analysis')
   await saveSession(next)
@@ -203,12 +230,18 @@ export async function analyzeSession(sessionId: string): Promise<DebugSession> {
 
   for (const file of proposal.files) normalizeProjectPath(file.path)
 
+  const fingerprintAtPropose = await fingerprintWorkspace(
+    session.workspaceRoot,
+    proposal.files.map((f) => f.path)
+  )
+
   const patch: PatchRecord = {
     id: `pat_${randomUUID().replace(/-/g, '').slice(0, 16)}`,
     createdAt: new Date().toISOString(),
     proposal,
     source,
     status: 'proposed',
+    fingerprintAtPropose,
   }
 
   next = {
@@ -216,10 +249,12 @@ export async function analyzeSession(sessionId: string): Promise<DebugSession> {
     status: 'awaiting_approval',
     diagnosis: { ...diagnosis, source, model },
     patches: [...next.patches, patch],
+    workspaceFingerprint: fingerprintAtPropose,
   }
   next = appendAudit(next, 'patch_proposed', patch.proposal.summary, {
     patchId: patch.id,
     source,
+    evidenceSource: next.evidenceSource,
   })
   return saveSession(next)
 }
@@ -227,13 +262,23 @@ export async function analyzeSession(sessionId: string): Promise<DebugSession> {
 export async function approvePatch(
   sessionId: string,
   patchId: string,
-  decision: 'approve' | 'reject'
+  decision: 'approve' | 'reject',
+  userId: string
 ): Promise<DebugSession> {
   const session = await getSession(sessionId)
-  if (!session) throw new Error('session not found')
+  if (!session || session.userId !== userId) throw Object.assign(new Error('session not found'), { status: 404 })
+
+  const target = session.patches.find((p) => p.id === patchId)
+  if (!target) throw new Error('patch not found')
+  if (target.status !== 'proposed') {
+    // Idempotent: already decided
+    if (target.status === 'approved' || target.status === 'applied') return session
+    if (target.status === 'rejected') return session
+    throw new Error('patch is not awaiting approval')
+  }
+
   const patches = session.patches.map((p) => {
     if (p.id !== patchId) return p
-    if (p.status !== 'proposed') throw new Error('patch is not awaiting approval')
     return {
       ...p,
       status: decision === 'approve' ? ('approved' as const) : ('rejected' as const),
@@ -247,48 +292,71 @@ export async function approvePatch(
   }
   next = appendAudit(next, decision === 'approve' ? 'patch_approved' : 'patch_rejected', patchId)
   next = await saveSession(next)
-  if (decision === 'approve') return applyAndVerify(next.id, patchId)
+  if (decision === 'approve') return applyAndVerify(next.id, patchId, userId)
   return next
 }
 
-async function applyAndVerify(sessionId: string, patchId: string): Promise<DebugSession> {
+async function applyAndVerify(sessionId: string, patchId: string, userId: string): Promise<DebugSession> {
   let session = await getSession(sessionId)
-  if (!session) throw new Error('session not found')
+  if (!session || session.userId !== userId) throw Object.assign(new Error('session not found'), { status: 404 })
   const patch = session.patches.find((p) => p.id === patchId)
   if (!patch || patch.status !== 'approved') throw new Error('patch not approved')
 
-  const snapshots: Record<string, string | null> = {}
-  await mkdir(session.workspaceRoot, { recursive: true })
-  for (const change of patch.proposal.files) {
-    const rel = normalizeProjectPath(change.path)
-    const abs = path.join(session.workspaceRoot, rel)
-    let previous: string | null = null
-    try {
-      previous = await readFile(abs, 'utf8')
-    } catch {
-      previous = null
-    }
-    if (change.action === 'replace' && previous === null) {
+  // Stale fingerprint check
+  if (patch.fingerprintAtPropose) {
+    const current = await fingerprintWorkspace(
+      session.workspaceRoot,
+      patch.proposal.files.map((f) => f.path)
+    )
+    if (current !== patch.fingerprintAtPropose) {
       session = appendAudit(
-        { ...session, status: 'blocked', error: `Target file missing: ${rel}` },
-        'apply_blocked',
-        rel
+        {
+          ...session,
+          status: 'blocked',
+          error: 'STALE_WORKSPACE: files changed since analysis',
+        },
+        'stale_workspace',
+        patchId
       )
       return saveSession(session)
     }
-    if (change.action === 'replace' && previous !== null) {
-      const inMemory = session.files.find((f) => f.path === rel)?.content
-      if (inMemory !== undefined && inMemory !== previous) {
-        // Prefer disk as source of truth; still allow apply but record mismatch
-        session = appendAudit(session, 'content_mismatch_warning', rel)
+  }
+
+  const snapshots: Record<string, string | null> = {}
+  await mkdir(session.workspaceRoot, { recursive: true })
+
+  try {
+    for (const change of patch.proposal.files) {
+      const { abs, rel } = await resolveInsideWorkspace(session.workspaceRoot, change.path)
+      let previous: string | null = null
+      try {
+        previous = await readFile(abs, 'utf8')
+      } catch {
+        previous = null
       }
+      if (change.action === 'replace' && previous === null) {
+        session = appendAudit(
+          { ...session, status: 'blocked', error: `Target file missing: ${rel}` },
+          'apply_blocked',
+          rel
+        )
+        return saveSession(session)
+      }
+      snapshots[rel] = previous
+      await mkdir((await import('node:path')).dirname(abs), { recursive: true })
+      await writeFile(abs, change.content, 'utf8')
+      const nextFiles: WorkspaceFile[] = session.files.filter((f) => f.path !== rel)
+      nextFiles.push({ path: rel, content: change.content })
+      session = { ...session, files: nextFiles }
     }
-    snapshots[rel] = previous
-    await mkdir(path.dirname(abs), { recursive: true })
-    await writeFile(abs, change.content, 'utf8')
-    const files = session.files.filter((f) => f.path !== rel)
-    files.push({ path: rel, content: change.content })
-    session = { ...session, files }
+  } catch (error) {
+    // Rollback partial writes
+    for (const [rel, content] of Object.entries(snapshots)) {
+      const { abs } = await resolveInsideWorkspace(session.workspaceRoot, rel)
+      if (content === null) await unlink(abs).catch(() => undefined)
+      else await writeFile(abs, content, 'utf8')
+    }
+    throw error
   }
 
   const patches = session.patches.map((p) =>
@@ -303,7 +371,7 @@ async function applyAndVerify(sessionId: string, patchId: string): Promise<Debug
   const attempts: ExecutionAttempt[] = []
   let allOk = true
   for (const kind of commands) {
-    const attempt = await runAllowlisted(session.workspaceRoot, kind)
+    const attempt = await runAllowlisted(session.workspaceRoot, kind, 'verify')
     attempts.push(attempt)
     allOk = allOk && attempt.ok
   }
@@ -322,22 +390,25 @@ async function applyAndVerify(sessionId: string, patchId: string): Promise<Debug
   return saveSession(session)
 }
 
-export async function rollbackPatch(sessionId: string, patchId: string): Promise<DebugSession> {
+export async function rollbackPatch(
+  sessionId: string,
+  patchId: string,
+  userId: string
+): Promise<DebugSession> {
   let session = await getSession(sessionId)
-  if (!session) throw new Error('session not found')
+  if (!session || session.userId !== userId) throw Object.assign(new Error('session not found'), { status: 404 })
   const patch = session.patches.find((p) => p.id === patchId)
   if (!patch?.snapshots) throw new Error('no snapshots to roll back')
   for (const [rel, content] of Object.entries(patch.snapshots)) {
-    const abs = path.join(session.workspaceRoot, normalizeProjectPath(rel))
+    const { abs } = await resolveInsideWorkspace(session.workspaceRoot, rel)
     if (content === null) {
-      const { unlink } = await import('node:fs/promises')
       await unlink(abs).catch(() => undefined)
       session = { ...session, files: session.files.filter((f) => f.path !== rel) }
     } else {
       await writeFile(abs, content, 'utf8')
-      const files = session.files.filter((f) => f.path !== rel)
-      files.push({ path: rel, content })
-      session = { ...session, files }
+      const nextFiles: WorkspaceFile[] = session.files.filter((f) => f.path !== rel)
+      nextFiles.push({ path: rel, content })
+      session = { ...session, files: nextFiles }
     }
   }
   const patches = session.patches.map((p) =>
@@ -347,19 +418,31 @@ export async function rollbackPatch(sessionId: string, patchId: string): Promise
   return saveSession(session)
 }
 
-export async function cancelSession(sessionId: string): Promise<DebugSession> {
+export async function cancelSession(sessionId: string, userId: string): Promise<DebugSession> {
   const session = await getSession(sessionId)
-  if (!session) throw new Error('session not found')
+  if (!session || session.userId !== userId) throw Object.assign(new Error('session not found'), { status: 404 })
   return saveSession(appendAudit({ ...session, status: 'cancelled' }, 'cancelled', 'User cancelled'))
 }
 
-export async function sessionReport(sessionId: string) {
+export async function sessionReport(sessionId: string, userId: string) {
   const session = await getSession(sessionId)
-  if (!session) throw new Error('session not found')
+  if (!session || session.userId !== userId) throw Object.assign(new Error('session not found'), { status: 404 })
   const latestVerify = [...session.executions].reverse().filter((e) => e.kind === 'verify')
   return {
     sessionId: session.id,
     status: toReportStatus(session),
+    evidenceSource: session.evidenceSource,
+    commitSha: session.commitSha,
+    isolation: session.isolation,
+    baseline: session.baseline
+      ? {
+          command: session.baseline.command,
+          exitCode: session.baseline.exitCode,
+          ok: session.baseline.ok,
+          timedOut: session.baseline.timedOut,
+          durationMs: session.baseline.durationMs,
+        }
+      : null,
     diagnosis: session.diagnosis
       ? {
           summary: session.diagnosis.problem_summary,
@@ -386,6 +469,6 @@ export async function sessionReport(sessionId: string) {
     })),
     checksPassed: latestVerify.filter((e) => e.ok).map((e) => e.command),
     checksFailed: latestVerify.filter((e) => !e.ok).map((e) => e.command),
-    note: 'A successful model patch without a passing verification command is NOT a verified fix.',
+    note: 'A successful model patch without a passing verification command is NOT a verified fix. VERIFIED requires Docker-executed exit code 0.',
   }
 }

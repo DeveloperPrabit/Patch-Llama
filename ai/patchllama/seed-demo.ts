@@ -1,14 +1,15 @@
 /*
  * SPDX-License-Identifier: AGPL-3.0-only
- * Seed a workspace from fixtures/patchllama-demo for a reproducible session.
+ * Seed a workspace from fixtures/patchllama-demo.
+ * Intake stderr is labeled seeded_fixture until baseline is executed in Docker.
  */
 
 import { existsSync } from 'node:fs'
-import { cp, mkdir, mkdtemp, readFile, writeFile } from 'node:fs/promises'
-import os from 'node:os'
+import { cp, mkdir, readFile, writeFile } from 'node:fs/promises'
 import path from 'node:path'
 import { startDebugSession } from './pipeline'
 import type { FailureIntake, WorkspaceFile } from './types'
+import { createManagedWorkspace, writeWorkspaceFiles } from './workspace-manager'
 
 export type DemoScenario = 'logic_bug' | 'type_error' | 'missing_import' | 'bad_patch'
 
@@ -28,19 +29,6 @@ async function readFixtureFiles(relPaths: string[]): Promise<WorkspaceFile[]> {
     files.push({ path: rel, content })
   }
   return files
-}
-
-async function prepareWorkspace(files: WorkspaceFile[]): Promise<string> {
-  const root = await mkdtemp(path.join(os.tmpdir(), 'patchllama-ws-'))
-  const fixture = path.resolve(fixtureRoot())
-  await cp(path.join(fixture, 'package.json'), path.join(root, 'package.json'))
-  await cp(path.join(fixture, 'tsconfig.json'), path.join(root, 'tsconfig.json'))
-  for (const file of files) {
-    const abs = path.join(root, file.path)
-    await mkdir(path.dirname(abs), { recursive: true })
-    await writeFile(abs, file.content, 'utf8')
-  }
-  return root
 }
 
 function intakeFor(scenario: DemoScenario, stderr: string, command: string): FailureIntake {
@@ -83,9 +71,9 @@ function intakeFor(scenario: DemoScenario, stderr: string, command: string): Fai
 
 export async function seedDemoSession(input: {
   scenario: DemoScenario
+  userId: string
   projectId?: string
   organizationId?: string
-  userId?: string
 }) {
   const scenario = input.scenario
   let files: WorkspaceFile[]
@@ -101,26 +89,33 @@ export async function seedDemoSession(input: {
     ])
     command = 'bun test'
     stderr =
-      'error: expect(received).toBe(expected)\n\nExpected: 5\nReceived: -1\n\n at src/math.test.ts:5'
+      '[seeded_fixture] error: expect(received).toBe(expected)\n\nExpected: 5\nReceived: -1\n\n at src/math.test.ts:5'
   } else if (scenario === 'type_error') {
     files = await readFixtureFiles(['src/greeter.ts', 'package.json', 'tsconfig.json'])
     command = 'bun run typecheck'
     stderr =
-      "src/greeter.ts(5,16): error TS2345: Argument of type 'string' is not assignable to parameter of type 'number'."
+      "[seeded_fixture] src/greeter.ts(5,16): error TS2345: Argument of type 'string' is not assignable to parameter of type 'number'."
   } else {
     files = await readFixtureFiles(['src/app.ts', 'package.json', 'tsconfig.json'])
     command = 'bun run build'
-    stderr = `Failed to resolve import "./missing-util" from "src/app.ts". Does the file exist?`
+    stderr = `[seeded_fixture] Failed to resolve import "./missing-util" from "src/app.ts". Does the file exist?`
   }
 
-  const workspaceRoot = await prepareWorkspace(files)
+  const ws = await createManagedWorkspace('demo')
+  const fixture = path.resolve(fixtureRoot())
+  await cp(path.join(fixture, 'package.json'), path.join(ws.root, 'package.json'))
+  await cp(path.join(fixture, 'tsconfig.json'), path.join(ws.root, 'tsconfig.json'))
+  await writeWorkspaceFiles(ws.root, files)
+
   const session = await startDebugSession({
     projectId: input.projectId || 'demo-project',
     organizationId: input.organizationId || 'demo-org',
-    userId: input.userId || 'demo-user',
+    userId: input.userId,
     intake: intakeFor(scenario, stderr, command),
     files,
-    workspaceRoot,
+    workspaceRoot: ws.root,
+    workspaceId: ws.id,
+    evidenceSource: 'seeded_fixture',
   })
   return session
 }

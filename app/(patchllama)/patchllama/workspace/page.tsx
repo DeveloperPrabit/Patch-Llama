@@ -74,19 +74,28 @@ function WorkspaceInner() {
 
   const fileContent = session?.files.find((f) => f.path === selectedFile)?.content || ''
 
+  async function ensureAuth() {
+    await fetch('/api/auth/demo-login', { method: 'POST' })
+  }
+
   async function runDemo(scenario: string) {
     setBusy('Seeding demo…')
     setError(null)
     setReport(null)
     try {
+      await ensureAuth()
       const response = await fetch('/api/patchllama/demo', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ scenario, analyze: true }),
+        body: JSON.stringify({ scenario, analyze: true, runBaseline: false }),
       })
       const data = await response.json()
       if (!response.ok) throw new Error(data?.error?.message || 'Demo failed')
-      setBanner(data.demoModeLabel || null)
+      const evidence = data.evidenceSource || data.session?.evidenceSource || 'seeded_fixture'
+      setBanner(
+        `${data.demoModeLabel || 'Demo'} · evidence=${evidence}` +
+          (data.session?.status === 'inconclusive' ? ' · INCONCLUSIVE' : '')
+      )
       setSession(data.session)
       setSelectedFile(data.session.files?.[0]?.path || null)
       window.history.replaceState({}, '', `/patchllama/workspace?session=${data.session.id}`)
@@ -102,6 +111,7 @@ function WorkspaceInner() {
     setBusy(decision === 'approve' ? 'Applying & verifying…' : 'Rejecting…')
     setError(null)
     try {
+      await ensureAuth()
       const response = await fetch(
         `/api/patchllama/sessions/${session.id}/patches/${proposed.id}/approve`,
         {

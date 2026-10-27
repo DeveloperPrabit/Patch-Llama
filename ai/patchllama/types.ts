@@ -13,6 +13,7 @@ export type SessionStatus =
   | 'verifying'
   | 'verified'
   | 'failed'
+  | 'inconclusive'
   | 'partially_verified'
   | 'blocked'
   | 'cancelled'
@@ -20,10 +21,13 @@ export type SessionStatus =
 export type TerminalReportStatus =
   | 'VERIFIED'
   | 'FAILED'
+  | 'INCONCLUSIVE'
   | 'PARTIALLY_VERIFIED'
   | 'AWAITING_APPROVAL'
   | 'BLOCKED'
   | 'CANCELLED'
+
+export type EvidenceSource = 'seeded_fixture' | 'executed_baseline'
 
 export type FailureIntake = {
   title: string
@@ -50,12 +54,14 @@ export type PatchRecord = {
   approvedAt?: string
   appliedAt?: string
   snapshots?: Record<string, string | null>
+  /** Hash of file contents at analysis time — apply rejects if changed. */
+  fingerprintAtPropose?: string
 }
 
 export type ExecutionAttempt = {
   id: string
   createdAt: string
-  kind: 'verify' | 'apply'
+  kind: 'baseline' | 'verify' | 'apply'
   command: string
   exitCode: number | null
   durationMs: number
@@ -82,8 +88,15 @@ export type DebugSession = {
   userId: string
   status: SessionStatus
   intake: FailureIntake
+  /** Server-managed workspace only */
   workspaceRoot: string
+  workspaceId: string
   files: WorkspaceFile[]
+  evidenceSource: EvidenceSource
+  commitSha?: string
+  repoFullName?: string
+  baseline?: ExecutionAttempt
+  workspaceFingerprint?: string
   diagnosis?: Diagnosis & { source: 'muse-spark' | 'demo'; model?: string }
   patches: PatchRecord[]
   executions: ExecutionAttempt[]
@@ -91,6 +104,7 @@ export type DebugSession = {
   maxRepairAttempts: number
   audit: AuditEvent[]
   error?: string
+  isolation?: 'docker' | 'unavailable' | 'demo_pending'
 }
 
 export function toReportStatus(session: DebugSession): TerminalReportStatus {
@@ -99,6 +113,8 @@ export function toReportStatus(session: DebugSession): TerminalReportStatus {
       return 'VERIFIED'
     case 'failed':
       return 'FAILED'
+    case 'inconclusive':
+      return 'INCONCLUSIVE'
     case 'partially_verified':
       return 'PARTIALLY_VERIFIED'
     case 'awaiting_approval':
@@ -112,4 +128,12 @@ export function toReportStatus(session: DebugSession): TerminalReportStatus {
         ? 'AWAITING_APPROVAL'
         : 'FAILED'
   }
+}
+
+export function kindFromFailure(
+  failureType: FailureIntake['failureType']
+): 'test' | 'build' | 'typecheck' {
+  if (failureType === 'build') return 'build'
+  if (failureType === 'typecheck') return 'typecheck'
+  return 'test'
 }

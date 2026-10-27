@@ -1,19 +1,32 @@
-/*
- * SPDX-License-Identifier: AGPL-3.0-only
- */
-
 import { NextResponse } from 'next/server'
-import { analyzeSession } from '@/ai/patchllama/pipeline'
+import { analyzeSession, runBaseline } from '@/ai/patchllama/pipeline'
+import { errorResponse, readJsonLimited, requireAuthed } from '@/lib/api'
+import { z } from 'zod/v4'
 
 export const runtime = 'nodejs'
 
-export async function POST(_request: Request, context: { params: Promise<{ id: string }> }) {
+const Body = z.object({
+  runBaseline: z.boolean().default(true),
+})
+
+export async function POST(
+  request: Request,
+  ctx: { params: Promise<{ id: string }> }
+) {
   try {
-    const { id } = await context.params
-    const session = await analyzeSession(id)
+    const user = await requireAuthed(request, 'analyze', 8, 60_000)
+    const { id } = await ctx.params
+    const body = Body.parse(await readJsonLimited(request).catch(() => ({})))
+    let session
+    if (body.runBaseline) {
+      session = await runBaseline(id, user.id)
+      if (session.status === 'inconclusive') {
+        return NextResponse.json({ session, status: 'INCONCLUSIVE' })
+      }
+    }
+    session = await analyzeSession(id, user.id)
     return NextResponse.json({ session })
   } catch (error) {
-    const message = error instanceof Error ? error.message : String(error)
-    return NextResponse.json({ error: { code: 'analyze_failed', message } }, { status: 400 })
+    return errorResponse(error)
   }
 }

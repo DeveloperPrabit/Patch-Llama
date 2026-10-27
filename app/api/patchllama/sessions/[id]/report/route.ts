@@ -1,19 +1,19 @@
-/*
- * SPDX-License-Identifier: AGPL-3.0-only
- */
-
 import { NextResponse } from 'next/server'
 import { sessionReport } from '@/ai/patchllama/pipeline'
+import { errorResponse, requireAuthed } from '@/lib/api'
 
 export const runtime = 'nodejs'
 
-export async function GET(_request: Request, context: { params: Promise<{ id: string }> }) {
+export async function GET(
+  request: Request,
+  ctx: { params: Promise<{ id: string }> }
+) {
   try {
-    const { id } = await context.params
-    const report = await sessionReport(id)
+    const user = await requireAuthed(request, 'report', 60)
+    const { id } = await ctx.params
+    const report = await sessionReport(id, user.id)
     return NextResponse.json({ report })
   } catch (error) {
-    const message = error instanceof Error ? error.message : String(error)
-    return NextResponse.json({ error: { code: 'not_found', message } }, { status: 404 })
+    return errorResponse(error)
   }
 }
